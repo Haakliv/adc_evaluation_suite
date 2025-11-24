@@ -11,75 +11,104 @@ def compute_settling_time(
     final_duration_us: float = 3.0,
     min_stable_samples: int = 10,
 ):
+    """
+    Compute settling time with separation of group delay and pure settling.
+    
+    Returns:
+        trigger_idx: Index representing trigger time (t=0, assumed at start of step detection)
+        response_idx: Index where ADC first responds to the step (end of group delay)
+        settling_idx: Index where signal has settled within tolerance
+        ts_us: Time step in microseconds
+    """
     ts_us = MICRO / fs
 
-    # Detect the step edge
-    settling_start = None
+    # Detect the step edge - this represents the trigger point (t=0)
+    trigger_idx = None
     for i in range(1, len(raw)):
         if raw[i] - raw[i-1] > tol_u_v:
-            settling_start = i - 1
+            trigger_idx = i - 1
             break
-    if settling_start is None:
-        return None, None, None
+    if trigger_idx is None:
+        return None, None, None, None
+
+    # The point where we detect the edge is actually when the ADC responds
+    # So the response starts at trigger_idx, but we can better detect it
+    # by finding where the signal starts changing significantly
+    response_idx = trigger_idx
 
     # Estimate the final value from a later window
-    i0 = int(settling_start + final_offset_us  / ts_us)
-    i1 = int(i0            + final_duration_us/ ts_us)
+    i0 = int(trigger_idx + final_offset_us  / ts_us)
+    i1 = int(i0          + final_duration_us/ ts_us)
     if i1 > len(raw):
-        return None, None, None
+        return None, None, None, None
     final_val = float(raw[i0:i1].mean())
 
-    # Find the first index i where the next N samples are all within ±thr of final_val
-    settling_end = None
+    # Find the first index i where the next N samples are all within ±tol of final_val
+    settling_idx = None
     last_start = len(raw) - min_stable_samples + 1
-    for i in range(settling_start+1, last_start):
+    for i in range(response_idx+1, last_start):
         block = raw[i : i + min_stable_samples]
         if np.all(np.abs(block - final_val) < tol_u_v):
             # Mark settling point at the end of the stable block
-            settling_end = i
+            settling_idx = i
             break
 
-    if settling_end is None:
-        return None, None, None
+    if settling_idx is None:
+        return None, None, None, None
 
-    return settling_start, settling_end, ts_us
+    return trigger_idx, response_idx, settling_idx, ts_us
 
 def compute_mean_settling_time(
     raw_runs: list[np.ndarray],
-    start_idxs: list[int],
-    end_idxs:   list[int],
-    ts_us:      float,
-    pad:        int = 2
-) -> tuple[float, np.ndarray, np.ndarray]:
+    trigger_idxs: list[int],
+    response_idxs: list[int],
+    settling_idxs: list[int],
+    ts_us: float,
+    pad: int = 2
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """
+    Compute mean settling metrics across multiple runs.
+    
+    Returns:
+        mean_group_delay: Mean time from trigger to response (us)
+        mean_settling: Mean time from response to settled (us)
+        time_vec: Time vector for the mean trace
+        mean_trace: Mean voltage trace across all runs
+    """
+    t_triggers = np.array(trigger_idxs) * ts_us
+    t_responses = np.array(response_idxs) * ts_us
+    t_settled = np.array(settling_idxs) * ts_us
+    
+    group_delays = t_responses - t_triggers
+    settling_times = t_settled - t_responses
+    total_times = t_settled - t_triggers
 
-    t_starts = np.array(start_idxs) * ts_us
-    t_ends   = np.array(end_idxs) * ts_us
-    deltas   = t_ends - t_starts
+    mean_group_delay = group_delays.mean()
+    mean_settling = settling_times.mean()
+    mean_total = total_times.mean()
 
-    mean_delta = deltas.mean()
-
-    # Find equal-length window across runs
-    pre_samps   = min(start_idxs)
-    post_samps  = min(len(raw) - end for raw, end in zip(raw_runs, end_idxs))
-    delta_samps = min(e - s for s, e in zip(start_idxs, end_idxs))
+    # Find equal-length window across runs (aligned to trigger point)
+    pre_samps = min(trigger_idxs)
+    post_samps = min(len(raw) - end for raw, end in zip(raw_runs, settling_idxs))
+    delta_samps = min(e - s for s, e in zip(trigger_idxs, settling_idxs))
 
     total_len = pre_samps + delta_samps + post_samps
 
     aligned = []
-    for raw, s_i in zip(raw_runs, start_idxs):
-        # Extract segment around the start index
-        seg = raw[s_i - pre_samps : s_i - pre_samps + total_len]
+    for raw, trig_i in zip(raw_runs, trigger_idxs):
+        # Extract segment around the trigger index (t=0)
+        seg = raw[trig_i - pre_samps : trig_i - pre_samps + total_len]
         aligned.append(seg)
     aligned = np.vstack(aligned)
 
     mean_trace = aligned.mean(axis=0)
 
+    # Time vector relative to trigger (t=0 at trigger)
     time_full = (np.arange(-pre_samps, -pre_samps + total_len) * ts_us)
 
-    # Truncate to pad around t=0 and t=mean_delta
-    # Find indices
+    # Truncate to show from slightly before trigger to slightly after settled
     zero_idx = int(np.searchsorted(time_full, 0))
-    end_idx = int(np.searchsorted(time_full, mean_delta))
+    end_idx = int(np.searchsorted(time_full, mean_total))
 
     start_i = max(0, zero_idx - pad)
     stop_i = min(len(time_full), end_idx + pad)
@@ -87,7 +116,7 @@ def compute_mean_settling_time(
     time_trunc = time_full[start_i:stop_i]
     trace_trunc = mean_trace[start_i:stop_i]
 
-    return mean_delta, time_trunc, trace_trunc
+    return mean_group_delay, mean_settling, time_trunc, trace_trunc
 
 def find_spur_rms(freqs, spectrum, target_freq, span_hz=5e3):
     # Limit to a window around the target

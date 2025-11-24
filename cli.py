@@ -256,15 +256,16 @@ def run_settling_time(args, logger, ace):
 
     gen = WaveformGenerator(args.sdg_host, "PULSE", args.offset)
     gen.pulse_diff(args.frequency, args.amplitude,
-                   low_percent=50.0, edge_time=2e-9)
+                   low_percent=50.0, edge_time=2e-9, enable_trigger_out=True)
     time.sleep(0.5)
 
     raw_runs = []
-    start_idxs = []
-    end_idxs = []
-    start_times = []
-    end_times = []
-    times_ns = []
+    trigger_idxs = []
+    response_idxs = []
+    settling_idxs = []
+    group_delay_times_ns = []
+    settling_times_ns = []
+    total_times_ns = []
 
     for run in range(1, args.runs + 1):
         raw = capture_samples(
@@ -273,53 +274,82 @@ def run_settling_time(args, logger, ace):
         )
         raw_runs.append(raw)
 
-        idx_start, idx_end, ts = compute_settling_time(
+        trig_idx, resp_idx, sett_idx, ts = compute_settling_time(
             raw, fs=odr, tol_u_v=lsb_eff_u_v
         )
 
-        if idx_start is None or idx_end is None:
+        if trig_idx is None or resp_idx is None or sett_idx is None:
             logger.warning("Run %d: settling not detected", run)
             continue
 
-        t_start = idx_start * ts
-        t_end = idx_end * ts
-        dt_us = t_end - t_start
+        t_trigger = trig_idx * ts
+        t_response = resp_idx * ts
+        t_settled = sett_idx * ts
+        
+        group_delay_us = t_response - t_trigger
+        settling_us = t_settled - t_response
+        total_us = t_settled - t_trigger
 
-        start_idxs.append(idx_start)
-        end_idxs.append(idx_end)
-        start_times.append(t_start)
-        end_times.append(t_end)
-        times_ns.append(dt_us * KILO)
+        trigger_idxs.append(trig_idx)
+        response_idxs.append(resp_idx)
+        settling_idxs.append(sett_idx)
+        group_delay_times_ns.append(group_delay_us * KILO)
+        settling_times_ns.append(settling_us * KILO)
+        total_times_ns.append(total_us * KILO)
 
-        logger.info("Run %d: Delta=%.2fus", run, dt_us)
+        logger.info("Run %d: Group delay=%.2f us, Settling=%.2f us, Total=%.2f us",
+                    run, group_delay_us, settling_us, total_us)
 
     gen.disable(1)
     gen.disable(2)
 
-    if not start_idxs or not end_idxs:
+    if not trigger_idxs or not settling_idxs:
         logger.error("No valid measurements obtained")
         return
 
-    # Compute and log the mean settling across all runs
-    mean_delta, time_vec, mean_seg = compute_mean_settling_time(raw_runs, start_idxs, end_idxs, ts_us, pad=2)
-    arr = np.array(times_ns)
-    mean_ns = arr.mean()
-    # Calculate the 95% CI for the mean settling time
-    std_ns = arr.std(ddof=1) if arr.size > 1 else 0.0
-    # 95% CI for the mean settling time
-    ci95_ns = 1.96 * std_ns / np.sqrt(arr.size) if arr.size > 1 else 0.0
+    # Compute and log the mean metrics across all runs
+    mean_group_delay, mean_settling, time_vec, mean_seg = compute_mean_settling_time(
+        raw_runs, trigger_idxs, response_idxs, settling_idxs, ts_us, pad=2
+    )
+    
+    # Calculate statistics for group delay
+    gd_arr = np.array(group_delay_times_ns)
+    gd_mean_ns = gd_arr.mean()
+    gd_std_ns = gd_arr.std(ddof=1) if gd_arr.size > 1 else 0.0
+    gd_ci95_ns = 1.96 * gd_std_ns / np.sqrt(gd_arr.size) if gd_arr.size > 1 else 0.0
+    
+    # Calculate statistics for settling time
+    st_arr = np.array(settling_times_ns)
+    st_mean_ns = st_arr.mean()
+    st_std_ns = st_arr.std(ddof=1) if st_arr.size > 1 else 0.0
+    st_ci95_ns = 1.96 * st_std_ns / np.sqrt(st_arr.size) if st_arr.size > 1 else 0.0
+    
+    # Calculate statistics for total time
+    tot_arr = np.array(total_times_ns)
+    tot_mean_ns = tot_arr.mean()
+    tot_std_ns = tot_arr.std(ddof=1) if tot_arr.size > 1 else 0.0
+    tot_ci95_ns = 1.96 * tot_std_ns / np.sqrt(tot_arr.size) if tot_arr.size > 1 else 0.0
 
     # Log mean +-95% CI and std in us
     logger.info(
-        "Mean settling: %.2f us +- %.2f us (95%% CI), std=%.2f us over %d runs",
-        mean_ns * 1e-3, ci95_ns * 1e-3, std_ns * 1e-3, arr.size
+        "Mean group delay: %.2f us +- %.2f us (95%% CI), std=%.2f us over %d runs",
+        gd_mean_ns * 1e-3, gd_ci95_ns * 1e-3, gd_std_ns * 1e-3, gd_arr.size
+    )
+    logger.info(
+        "Mean settling time: %.2f us +- %.2f us (95%% CI), std=%.2f us over %d runs",
+        st_mean_ns * 1e-3, st_ci95_ns * 1e-3, st_std_ns * 1e-3, st_arr.size
+    )
+    logger.info(
+        "Mean total time: %.2f us +- %.2f us (95%% CI), std=%.2f us over %d runs",
+        tot_mean_ns * 1e-3, tot_ci95_ns * 1e-3, tot_std_ns * 1e-3, tot_arr.size
     )
 
-    if (args.plot or args.show) and raw_runs and start_idxs:
+    if (args.plot or args.show) and raw_runs and trigger_idxs:
         plot_file = os.path.join(os.getcwd(), 'settling.png')
         plot_settling_time(
-            raw_runs, start_idxs, end_idxs,
-            ts_us, time_vec, mean_seg, mean_delta,
+            raw_runs, trigger_idxs, response_idxs, settling_idxs,
+            ts_us, time_vec, mean_seg, 
+            mean_group_delay, mean_settling,
             filt, odr,
             args.frequency, args.amplitude, args.runs,
             out_file=plot_file,

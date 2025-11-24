@@ -5,55 +5,84 @@ from matplotlib.ticker import MaxNLocator
 
 def plot_settling_time(
     raw_runs: list[np.ndarray],
-    start_idxs: list[int],
-    end_idxs:   list[int],
-    ts_us:      float,
-    time_vec:   np.ndarray,
-    mean_seg:   np.ndarray,
-    mean_delta: float,
-    filt:       str,
-    odr:        float,
-    frequency:  float,
-    amplitude:  float,
-    runs:       int,
-    out_file:   str = None,
-    show:       bool = False,
+    trigger_idxs: list[int],
+    response_idxs: list[int],
+    settling_idxs: list[int],
+    ts_us: float,
+    time_vec: np.ndarray,
+    mean_seg: np.ndarray,
+    mean_group_delay: float,
+    mean_settling: float,
+    filt: str,
+    odr: float,
+    frequency: float,
+    amplitude: float,
+    runs: int,
+    out_file: str = None,
+    show: bool = False,
 ):
+    """
+    Plot settling time showing both group delay and settling phases.
+    Time axis is relative to trigger (t=0).
+    """
     pad = 10
 
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 7))
 
-    for raw, s_idx, e_idx in zip(raw_runs, start_idxs, end_idxs):
-        start = max(0, s_idx)
-        end   = min(len(raw), e_idx + pad)
-        t     = (np.arange(start, end) * ts_us) - (s_idx * ts_us)
-        seg   = raw[start:end]
+    # Plot individual runs (aligned to trigger)
+    for raw, trig_idx, resp_idx, sett_idx in zip(raw_runs, trigger_idxs, response_idxs, settling_idxs):
+        start = max(0, trig_idx - 2)
+        end = min(len(raw), sett_idx + pad)
+        # Time relative to trigger (t=0 at trigger)
+        t = (np.arange(start, end) * ts_us) - (trig_idx * ts_us)
+        seg = raw[start:end]
         plt.plot(t, seg, color='gray', alpha=0.2)
 
-    # Truncate out the very first sample of the mean trace
+    # Plot mean trace
     t_mean = time_vec[1:]
     seg_mean = mean_seg[1:]
 
-    plt.plot(t_mean, seg_mean, label='Mean Settling', linewidth=2)
-    plt.axvline(0, linestyle=':', label='Mean start', linewidth=2)
-    plt.axvline(mean_delta, linestyle='--', label='Mean end', linewidth=2)
-    plt.axvspan(0, mean_delta, alpha=0.2, label='Mean window')
+    plt.plot(t_mean, seg_mean, label='Mean trace', linewidth=2.5, color='blue')
+    
+    # Mark the trigger point (t=0)
+    plt.axvline(0, linestyle=':', label='Trigger (t=0)', linewidth=2, color='green')
+    
+    # Mark the response point (end of group delay)
+    plt.axvline(mean_group_delay, linestyle='-.', label=f'Response ({mean_group_delay:.2f} µs)', 
+                linewidth=2, color='orange')
+    
+    # Mark the settled point
+    total_time = mean_group_delay + mean_settling
+    plt.axvline(total_time, linestyle='--', label=f'Settled ({total_time:.2f} µs)', 
+                linewidth=2, color='red')
+    
+    # Shade group delay region
+    plt.axvspan(0, mean_group_delay, alpha=0.15, color='orange', label=f'Group delay ({mean_group_delay:.2f} µs)')
+    
+    # Shade settling region
+    plt.axvspan(mean_group_delay, total_time, alpha=0.15, color='red', 
+                label=f'Settling ({mean_settling:.2f} µs)')
+    
     xmin, xmax = t_mean[0], t_mean[-1]
     plt.xlim(xmin, xmax)
 
-    plt.xlabel('Time relative to edge (µs)')
-    plt.ylabel('Voltage')
+    plt.xlabel('Time relative to trigger (µs)', fontsize=11)
+    plt.ylabel('Voltage (V)', fontsize=11)
 
     min_t, max_t = t_mean[0], t_mean[-1]
-    plt.xticks(np.arange(min_t, max_t + 1e-9, 0.8))
+    # Adaptive tick spacing
+    tick_spacing = 0.8 if (max_t - min_t) < 10 else 2.0
+    plt.xticks(np.arange(min_t, max_t + 1e-9, tick_spacing))
 
     plt.title(
-        f"{runs}-run Settling Transient\n"
-        f"@ {frequency:.1f}Hz, {amplitude:.2f}Vpp, {filt} - ODR {odr/MICRO:.2f}MHz"
+        f"{runs}-run Settling Analysis (Trigger → Response → Settled)\n"
+        f"@ {frequency:.1f} Hz, {amplitude:.2f} Vpp, {filt} - ODR {odr/MICRO:.2f} MHz\n"
+        f"Group Delay: {mean_group_delay:.2f} µs | Settling Time: {mean_settling:.2f} µs | Total: {total_time:.2f} µs",
+        fontsize=10
     )
 
-    plt.grid(axis='x', which='major', alpha=0.3)
-    plt.legend(ncol=2, fontsize='small')
+    plt.grid(axis='both', which='major', alpha=0.3, linestyle=':')
+    plt.legend(ncol=2, fontsize='small', loc='best')
     plt.tight_layout()
 
     if out_file:

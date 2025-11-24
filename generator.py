@@ -28,6 +28,50 @@ class WaveformGenerator:
     def enable(self, channel):
         self.sdg.enable_output(channel)
 
+    def enable_trigger_out(self, channel: int = 1):
+        """Enable trigger output on the specified channel."""
+        self.sdg.interface.write(f"C{channel}:OUTP TRMD,ON")
+
+    def disable_trigger_out(self, channel: int = 1):
+        """Disable trigger output on the specified channel."""
+        self.sdg.interface.write(f"C{channel}:OUTP TRMD,OFF")
+
+    def set_trigger_mode(self, mode: str = "RISE", channel: int = 1):
+        """
+        Set trigger mode for the channel.
+        
+        Args:
+            mode: Trigger mode - "OFF", "RISE", "FALL", "EDGE", "PULS", or "BURST"
+            channel: Channel number (1 or 2)
+        """
+        valid_modes = ["OFF", "RISE", "FALL", "EDGE", "PULS", "BURST"]
+        if mode.upper() not in valid_modes:
+            raise ValueError(f"Invalid trigger mode. Must be one of {valid_modes}")
+        self.sdg.interface.write(f"C{channel}:BTWV TRMD,{mode.upper()}")
+
+    def set_burst_mode(self, ncycles: int = 1, channel: int = 1, trigger_source: str = "EXT"):
+        """
+        Configure burst mode for the channel.
+        
+        Args:
+            ncycles: Number of cycles per burst (1-1000000)
+            channel: Channel number (1 or 2)
+            trigger_source: Trigger source - "EXT" (external), "INT" (internal), or "MAN" (manual)
+        """
+        valid_sources = ["EXT", "INT", "MAN"]
+        if trigger_source.upper() not in valid_sources:
+            raise ValueError(f"Invalid trigger source. Must be one of {valid_sources}")
+        
+        # Set burst mode
+        self.sdg.interface.write(f"C{channel}:BTWV STATE,ON")
+        self.sdg.interface.write(f"C{channel}:BTWV TRSR,{trigger_source.upper()}")
+        self.sdg.interface.write(f"C{channel}:BTWV TIME,{ncycles}")
+        self.sdg.interface.write(f"C{channel}:BTWV DLAY,0")
+
+    def disable_burst_mode(self, channel: int = 1):
+        """Disable burst mode for the channel."""
+        self.sdg.interface.write(f"C{channel}:BTWV STATE,OFF")
+
     def pulse_diff(
         self,
         frequency: float,
@@ -36,6 +80,7 @@ class WaveformGenerator:
         edge_time: float = 2e-9,
         ch_pos: int = 1,
         ch_neg: int = 2,
+        enable_trigger_out: bool = False,
     ):
 
         safe_vpp = limit_vpp_offset(amplitude, self.offset)
@@ -57,6 +102,10 @@ class WaveformGenerator:
             self.sdg.interface.write(f"C{ch}:BSWV FALL,{edge_time}")
 
         self.sdg.interface.write(f"C{ch_neg}:OUTP PLRT,INVT")
+
+        # Enable trigger output if requested (typically on ch_pos)
+        if enable_trigger_out:
+            self.enable_trigger_out(ch_pos)
 
         self.sdg.enable_output(ch_pos)
         self.sdg.enable_output(ch_neg)
